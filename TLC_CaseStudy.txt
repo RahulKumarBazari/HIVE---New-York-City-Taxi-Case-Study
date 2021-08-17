@@ -1,0 +1,361 @@
+--New York City Taxi & Limousine Commission (TLC) Case Study
+
+--Adding pre-requisite for jar file & partition commands
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+--Creating a database of name "bigdata_assignment"
+create database bigdata_assignment;
+
+use bigdata_assignment;
+
+--Creating an external table "taxi_data" to load the data
+--the data is located at path '/common_folder/nyc_taxi_data/'
+create external table if not exists taxi_data(VendorID int, tpep_pickup_datetime  timestamp,tpep_dropoff_datetime timestamp, Passenger_count int, 
+Trip_distance double, RateCodeID int, Store_and_fwd_flag string, PULocationID int, DOLocationID int, Payment_type int, Fare_amount double, 
+Extra double, MTA_tax double, Tip_amount double, Tolls_amount double, Improvement_surcharge double, Total_amount double) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+--skipping the first row in the table as it has NULL's => "skip.header.line.count"="1"
+select * from taxi_data limit 10;
+
+--Observing the shape of the table
+select count(*) as total_rows from taxi_data;
+
+--the total_rows in the table are: 1174569
+
+-- QUICK ANALYSIS ON THE TABLE DATA
+
+--Observing the total rows for the months nov and dec in 2017:
+select count(*) as total_rows_nov_dec_2017 from taxi_data where (year(tpep_pickup_datetime)=2017 and month(tpep_pickup_datetime) in (11,12));
+--COMMENT: the total rows in months november and december in year 2017 are :1174555
+
+--Observing the distribution of data in the vendor column:
+select VendorID, count(passenger_count) as count from taxi_data group by VendorID;
+--COMMENT:
+--Vendor 1 has 527386 rows
+--Vendor 2 has 647183 rows
+
+--Observing the distribution of data in the column (MTA_tax):
+select VendorID,MTA_tax,count(MTA_tax) as count from taxi_data group by VendorID,MTA_tax order by VendorID;
+--COMMENT: the count is high for tax value (0,0.5). Other values are less in count and insignificant for analysis.
+
+--Observing the distribution of data in the column (extra):
+select VendorID,extra,count(extra) as count from taxi_data group by VendorID,extra order by VendorID;
+--COMMENT: there are negative values which are errors, these are in significant for analysis
+
+--Observing the distribution of data in the column (RatecodeID):
+select VendorID,RatecodeID, count(RatecodeID) as count from taxi_data group by VendorID,RatecodeID;
+--COMMENT:there is an error value 99 in the column, we need to remove this.
+
+--Observing the data distribution in the column (tpep_pickup_datetime):
+select VendorID, min(tpep_pickup_datetime) as min_pickup_date, max(tpep_pickup_datetime) as max_pickup_date from taxi_data group by VendorID;
+--COMMENT: it is evident that data is available from 2003 to 2018 for the vendor 2.
+--We need to consider only 2017 data for the months nov and december.
+
+--Observing the data distribution in the column (passenger_count):
+select VendorID, min(passenger_count) as min_passengers, max(passenger_count) as max_passengers from taxi_data group by VendorID;
+--COMMENT: the maximum passgengers are of 9. Passenger count 0 is invalid.
+
+--Observing the data distribution in the column (Improvement_surcharge):
+select VendorID, min(Improvement_surcharge) as min_surcharge, max(Improvement_surcharge) as max_surcharge from taxi_data group by VendorID;
+--COMMENT:there are negative values in the column which are errors, need to be remove these values.
+
+select VendorID,Improvement_surcharge, count(Improvement_surcharge) as count from taxi_data group by VendorID,Improvement_surcharge;
+--COMMENT: Continuing above observation, there are 558 rows for negative values in the Improvement_surcharge which can be removed
+
+--Observing the data distribution in the column (Payment type):
+select payment_type as `Payment Type`, count(*) as count from taxi_data group by payment_type order by payment_type;
+--COMMENT: 4 payment types are found 1- Credit Card, 2- Cash, 3- No charge, 4- Dispute
+--Credit Card Payment type has the highest usage
+
+--Observing the data distribution in the column (Tip Amount):
+select tip_amount, count(*) as count from taxi_data where tip_amount <0 group by tip_amount order by tip_amount;
+--COMMENT: 4 records with negative tip amount, which needs to be removed
+
+--Observing the data distribution in the column (Store and forward flag)
+select store_and_fwd_flag, count(*) as count from taxi_data group by store_and_fwd_flag;
+--COMMENT: Y flag for 3951 rows, N flag for 1170618 rows
+------------------------------------------------------
+
+-- BASIC DATA QUALITY CHECKS
+--(1) How many records has each TPEP provider provided? Write a query that summarises the number of records of each provider.
+select vendorid, count(*) as Record_Count from taxi_data 
+group by vendorid;
+
+-- COMMENT:
+-- Vendor 1 provides 527386 records
+-- Vendor 2 provides 647183 records
+-- Vendor 2 provides more data than Vendor 1
+
+--(2) The data provided is for months November and December only. Check whether the data is consistent,
+-- and if not, identify the data quality issues. Mention all data quality issues in comments. 
+
+--We are considering the trips that has pickup timestamp in Nov & Dec 2017
+select year(tpep_pickup_datetime) as year, month(tpep_pickup_datetime) as month, count(*) as record_count
+from taxi_data
+group by year(tpep_pickup_datetime), month(tpep_pickup_datetime);
+
+-- COMMENT:
+-- A total of 14 records does not belong to Nov and Dec 2017 which can be ignored.
+-- Nov 2017 has 580300 rows
+-- Dec 2017 has 594255 rows
+
+-- Now, we consider the drop off timestamp for Nov & Dec 2017
+select year(tpep_dropoff_datetime) as year, month(tpep_dropoff_datetime) as month, count(*) as record_count
+from taxi_data
+group by year(tpep_dropoff_datetime), month(tpep_dropoff_datetime);
+
+-- COMMENT:
+-- A total of 117 records does not belong to Nov and Dec 2017 which can be ignored.
+-- Nov 2017 has 580053 rows
+-- Dec 2017 has 594399 rows
+
+--Looking at erroneous records that have pickup datetime < dropoff timestamp
+select count(*) as error_rec
+from taxi_data
+where tpep_pickup_datetime > tpep_dropoff_datetime;
+
+-- COMMENT:
+-- A total of 73 records are erroneous record
+
+-- (3) You might have encountered unusual or erroneous rows in the dataset. Can you conclude which vendor is doing a bad job in providing the records
+-- using different columns of the dataset? Summarise your conclusions based on every column where these errors are present. 
+
+select vendorid, count(*) from taxi_data
+where date(tpep_pickup_datetime) < '2017-11-01'
+or date(tpep_pickup_datetime) > '2017-12-31'
+or tpep_dropoff_datetime < tpep_pickup_datetime
+or passenger_count = 0
+or ratecodeid = '99'
+or fare_amount <= 0
+or extra not in (0,0.5,1)
+or mta_tax not in (0,0.5)
+or tip_amount < 0
+or tolls_amount < 0
+or improvement_surcharge not in (0,0.3)
+or total_amount <= 0
+or trip_distance <= 0
+group by vendorid
+order by vendorid;
+
+-- COMMENT: Vendor 1 (Creative Mobile Technologies, LLC) has 12882 erroneous records i.e 2.4% of total 
+-- and vendor 2 (VeriFone Inc.) has 6336 erroneous records i.e 0.98% of total
+-- Vendor 1 is doing a bad job in providing the records mainly for total_amount, improvement_surcharge, tolls_amount, tip_amount, mta_tax, fare_amount, passenger_count, pickup and drop off time
+
+-- Creating a ORC table with partitions for analysis
+create external table if not exists taxi_data_partitioned_orc
+(VendorID int, tpep_pickup_datetime  timestamp,tpep_dropoff_datetime timestamp, Passenger_count int, Trip_distance double, RateCodeID int, Store_and_fwd_flag string, 
+PULocationID int, DOLocationID int, Payment_type int, Fare_amount double, Extra double, MTA_tax double, Tip_amount double, Tolls_amount double, 
+Improvement_surcharge double, Total_amount double)partitioned by (vendor int,month int)
+stored as orc location '/user/hive/warehouse/TLC_CaseStudy_AZ_DS'
+tblproperties ("orc.compress"="SNAPPY");
+
+--Created the ORC table by partitioning the columns vendor, month.
+
+-- Overwriting the ORC table "taxi_data_partitioned_orc"
+insert overwrite table taxi_data_partitioned_orc partition(vendor, month)
+select VendorID, tpep_pickup_datetime, tpep_dropoff_datetime, Passenger_count, Trip_distance,RateCodeID, Store_and_fwd_flag, PULocationID, DOLocationID, Payment_type, 
+Fare_amount, Extra, MTA_tax, Tip_amount, Tolls_amount, Improvement_surcharge, Total_amount,VendorID as vendor,month(tpep_pickup_datetime) as month from taxi_data where 
+(year(tpep_pickup_datetime) = 2017 and month(tpep_pickup_datetime) in  (11,12))
+and passenger_count>0
+and trip_distance>0
+and RatecodeID!=99
+and fare_amount>0
+and Tip_amount>=0
+and Tolls_amount>=0
+and Total_amount>0
+and tpep_pickup_datetime <= tpep_dropoff_datetime
+and extra >= 0
+and mta_tax >=0
+and Improvement_surcharge >= 0
+
+select * from taxi_data_partitioned_orc limit 10
+
+--COMMENT:
+--We have loaded the data in to the ORC table by reomving the insignificant rows, now the data in the table is clean.
+--Assumptions--
+--> YEAR AND MONTH : We are using tpep_pickup_datetime (pickup date and time) should be from Nov, 2017 to Dec, 2017
+--> PASSENGER COUNT: A 0 passenger_count is erroneous since trip should not happen without a passenger
+--> RATECODEID     : RateCodeID as 99 is erroneous as not defined in the Data Dictionary
+--> TRIP_DISTANCE  : trip_distance as 0 or less than 0 is erroneous, a trip must always have a positive value greater than 0
+--> FARE_AMOUNT    : fare_amount as 0 or less than 0 is erroneous as a trip must have a positive fare
+--> EXTRA          : Extra is less than 0 is erroneous as a trip must have 0 or a positive extra charge
+--> ADDRESSING MTA_TAX : mta_tax is less than 0 is erroneous as a trip must have 0 or a positive mta Tax
+--> TIP_AMOUNT     : Tip_amount is less than 0 is erroneous as a trip must have 0 or a positive tip amount
+--> TOLLS_AMOUNT   : Tolls_amount is less than 0 is erroneous as a trip must have 0 or a positive tolls amount
+--> IMPROVEMENT_SURCHARGE : Improvement_surcharge is less than 0 is erroneous since a trip must have 0 or a positive improvement surcharge
+--> TOTAL_AMOUNT   : Total_amount is 0 or less than 0 is erroneous as a trip must have a positive total amount
+--> tpep_pickup_datetime vs tpep_dropoff_datetime : Removing records with pickup timestamp > drop timestamp
+
+--Observing the number of records vendor wise
+select VendorID, count(*) as num_of_rows from taxi_data_partitioned_orc group by VendorID;
+--COMMENT: The total rows in the ORC table vendor wise are : 
+--Vendor 1	516231
+--Vendor 2	643509
+
+--Observing the data in ORC table
+select * from taxi_data_partitioned_orc limit 10;
+--COMMENT: The data looks good for analysis now.
+
+--<< ANALYSIS - I >>--
+
+-- (1) Compare the overall average fare per trip for November and December.
+
+select month, round(avg(fare_amount),2) as Average_Fare_Amount, round(avg(total_amount),2) as Average_Total_Amount
+from taxi_data_partitioned_orc
+group by month;
+
+--COMMENT: 
+--The average fare for November 2017 @ $13.06 is greater than of December 2017 @ $12.85
+--The average total amount for November 2017 @ $16.4 is greater than of December 2017 @ $16.1
+--OUTPUT:
+--month 	average_fare_amount 	average_total_amount
+--   11	                  13.06	                    16.4
+--   12	                  12.85	                    16.1
+
+-- (2) Explore the ‘number of passengers per trip’ - how many trips are made by each level of ‘Passenger_count’? 
+--     Do most people travel solo or with other people?
+
+select passenger_count, count(*) as trip_count from taxi_data_partitioned_orc group by passenger_count;
+
+--COMMENT: 
+--the trips are made by each level of ‘Passenger_count’ are from 1 to 7 per trip
+--Solo trips are the most preferred option with 821251 trips as compared to 338489 trips for more than 1 passenger
+--Solo trips makes 70.81% of the total trips
+--OUTPUT:
+--	passenger_count		trip_count
+--	              1	        821251
+--	              2			175838
+--                3		  	 50457
+--	              4			 24812
+--	              5			 54342
+--                6			 33037
+--	              7			     3
+
+-- (3) Which is the most preferred mode of payment?
+
+select payment_type,count(*) as payment_type_count from taxi_data_partitioned_orc group by payment_type;
+
+--COMMENT: 
+--Mode of Payments used in the Nov & Dev 2017 data are 1= Credit card, 2= Cash, 3= No charge & 4= Dispute
+--Most Preferred mode of Payment is through Credit Cards with 782755 occurences i.e. 67.49 % of total payment modes usage
+--OUTPUT:
+--	payment_type	payment_type_count
+--	           1		        782755
+--             2	        	370875
+--        	   3	        	4782
+--	           4		        1328
+
+-- (4) What is the average tip paid per trip? 
+-- Compare the average tip with the 25th, 50th and 75th percentiles and comment whether the ‘average tip’ is a representative statistic (of the central tendency) 
+-- of ‘tip amount paid’. 
+
+select percentile_approx(tip_amount, 0.25) as 25th_percentile,
+percentile_approx(tip_amount, 0.50) as 50th_percentile,
+percentile_approx(tip_amount, 0.75) as 75th_percentile,
+avg(tip_amount) as average_tip_amount from taxi_data_partitioned_orc;
+
+--COMMENT: 
+-- The Average Tip Amount is $1.85
+-- The percentile values are skewed towards the higher side
+-- The average tip ($1.85) is not the completely representative statistic (of the central tendency) of tip amount paid at the 50th percentile which is $1.36
+--OUTPUT:
+-- 	25th_percentile		50th_percentile		75th_percentile		average_tip_amount
+--	              0		           1.36	               2.45	                1.8486
+
+-- (5) Explore the ‘Extra’ (charge) variable - what fraction of total trips have an extra charge is levied?
+
+select (sum(if(extra> 0,1,0))/count(*))*100 AS fraction_of_total_trips
+from taxi_data_partitioned_orc;
+
+--COMMENT: 
+--The fraction of trips that had extra charge is: 46.33%
+--OUTPUT:
+-- fraction_of_total_trips
+--      46.332281373411284
+
+--<< ANALYSIS - II >>--
+
+-- (1) What is the correlation between the number of passengers on any given trip, and the tip paid per trip? 
+-- Do multiple travellers tip more compared to solo travellers?
+select round(corr(passenger_count, tip_amount),2) as `Corr for PassengerCount vs Tip`, 
+round(avg(CASE when passenger_count =1 then tip_amount else null end), 2) as `Avg Tip by Solo Passenger`, 
+round(avg(CASE when passenger_count != 1 then tip_amount else null end), 2) as `Avg Tip by Multiple Passenger`
+from taxi_data_partitioned_orc
+where payment_type != 2; --ignoring 2=Cash according to Data Dictionary
+
+--COMMENT: 
+--There is very weak correlation between passenger count vs tip (corr = 0.01)
+--Multiple Passenger may tend to pay slightly more tips when compared to Solo Passenger.
+--OUTPUT:
+--corr for passengercount vs tip   	avg tip by solo passenger   	avg tip by multiple passenger
+--                          0.01	                     2.69                                2.78
+
+-- (2) Segregate the data into five segments of ‘tip paid’: [0-5), [5-10), [10-15) , [15-20) and >=20. 
+-- Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).
+
+select `Tips-Bucket`, count(*) as `Bucket Record Count`, round(100*count(*)/max(`Row Count`),2) as `Tips-Bucket %`
+from (select * , count(*) over () as `Row Count`,
+	CASE WHEN tip_amount >= 0 and tip_amount <5 THEN '[0-5)' 
+	WHEN tip_amount >=5 and tip_amount < 10 THEN '[5-10)'
+	WHEN tip_amount >=10 and tip_amount < 15 THEN '[10-15)'
+	WHEN tip_amount >=15 and tip_amount < 20 THEN '[15-20)'
+	ELSE '>=20' 
+	END as `Tips-Bucket` 
+    from taxi_data_partitioned_orc) as X
+group by `Tips-Bucket`
+order by `Tips-Bucket %` desc;
+
+--COMMENT: 
+--92% of the tips are paid in the $0-$5 bucket
+--OUTPUT:
+-- tips-bucket	    bucket record count     tips-bucket %
+--  	[0-5)	                1069032	            92.18
+--  	[5-10)	                65607	            5.66
+--  	[10-15)	                21410	            1.85
+--  	[15-20)	                2627	            0.23
+--  	>=20	                1064	            0.09
+
+-- (3) Which month has a greater average ‘speed’ - November or December? Note that the variable ‘speed’ will have to be derived from other metrics.
+
+select month, round(avg(`Speed`),2) as `Average Speed(mph)`
+from (select month as `Month`,
+round((trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600)),2) as `Speed`
+from taxi_data_partitioned_orc) as X
+group by month;
+
+--COMMENT: 
+--The average speed (mph) for the month of December 2017 @ 11.1 mph is slightly higher than the average speed for the month of November 2017 @ 11 mph
+--OUTPUT:
+--  	month	average speed(mph)
+-- 	       11	                11
+-- 	       12	                11.1
+
+-- (4) Analyse the average speed of the most happening days of the year, i.e. 31st December (New year’s eve) and 25th December (Christmas)
+-- and compare it with the overall average. 
+
+select round(avg(CASE WHEN date(tpep_pickup_datetime) = '2017-12-25'
+                      THEN trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600)
+                      ELSE NULL END),2) as `Christmas Average Speed(mph)`,
+                      
+       round(avg(CASE WHEN date(tpep_pickup_datetime) = '2017-12-31'
+                      THEN trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600)
+                      ELSE NULL END),2) as `New Year Eve Average Speed(mph)`,
+                      
+       round(avg(trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600)),2) as `Overall Average Speed(mph)`
+                      
+from taxi_data_partitioned_orc;
+
+--COMMENT: 
+--The average speed (mph) on Christmas @ 15.27	mph is higher than the average speed on New Year's Eve @ 13.24 mph
+--The average speed (mph) on Christmas & New Year's Eve is higher than the Overall Average Speed for the months of Nov & Dec 2017
+--OUTPUT:
+-- christmas average speed(mph)	    new year eve average speed(mph)	    overall average speed(mph)
+--                        15.27	                              13.24	                         11.05
+
+-- THE END --
